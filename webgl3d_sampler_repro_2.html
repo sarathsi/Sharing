@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WebGL2 3D Texture Sampler Repro</title>
+  <style>
+    :root {
+      --bg: #0e1116;
+      --panel: #171c24;
+      --text: #d9e1ee;
+      --muted: #90a0b8;
+      --accent: #47b5ff;
+      --ok: #6dd57b;
+      --warn: #ffcf5a;
+      --bad: #ff6d6d;
+    }
+
+    * {
+      box-sizing: border-box;
+      font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+    }
+
+    body {
+      margin: 0;
+      background: radial-gradient(circle at 10% 20%, #1a2331, var(--bg));
+      color: var(--text);
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: minmax(300px, 420px) 1fr;
+      gap: 12px;
+      padding: 12px;
+    }
+
+    .panel {
+      background: color-mix(in oklab, var(--panel) 92%, black);
+      border: 1px solid #2a3446;
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 130px 1fr;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .row input,
+    .row select,
+    .row button {
+      width: 100%;
+      border-radius: 8px;
+      border: 1px solid #30405a;
+      background: #0f1520;
+      color: var(--text);
+      padding: 8px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .status {
+      margin: 8px 0 0;
+      font-size: 13px;
+      color: var(--muted);
+      white-space: pre-wrap;
+      line-height: 1.4;
+      max-height: 32vh;
+      overflow: auto;
+      border: 1px solid #2a3446;
+      border-radius: 8px;
+      padding: 8px;
+      background: #0c111a;
+    }
+
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+
+    canvas {
+      width: 100%;
+      height: calc(100vh - 24px);
+      border: 1px solid #2a3446;
+      border-radius: 12px;
+      background: #000;
+      display: block;
+    }
+
+    @media (max-width: 900px) {
+      body {
+        grid-template-columns: 1fr;
+      }
+
+      canvas {
+        height: 60vh;
+      }
+    }
+  </style>
+</head>
+<body>
+  <section class="panel">
+    <h2 style="margin: 0 0 10px;">WebGL2 3D Texture Repro</h2>
+
+    <div class="row">
+      <label for="dims">Texture Size</label>
+      <select id="dims">
+        <option value="64,64,384">64 x 64 x 384</option>
+        <option value="128,128,256">128 x 128 x 256</option>
+        <option value="128,128,384" selected>128 x 128 x 384</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="uploadType">Upload Type</label>
+      <select id="uploadType">
+        <option value="float" selected>GL_FLOAT</option>
+        <option value="half">GL_HALF_FLOAT</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="filterMode">Filter</label>
+      <select id="filterMode">
+        <option value="linear" selected>LINEAR</option>
+        <option value="nearest">NEAREST</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="sampleMode">Sample Mode</label>
+      <select id="sampleMode">
+        <option value="0" selected>texture(sampler3D)</option>
+        <option value="1">manual z lerp (texelFetch)</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="renderPath">Render Path</label>
+      <select id="renderPath">
+        <option value="slice" selected>single slice</option>
+        <option value="raymarch">ray-march volume</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="useOffscreen">Offscreen FBO</label>
+      <select id="useOffscreen">
+        <option value="off" selected>Off</option>
+        <option value="on">On</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="zSlice">Z Slice</label>
+      <input id="zSlice" type="range" min="0" max="1" step="0.001" value="0.5" />
+    </div>
+
+    <div class="row">
+      <label for="anim">Animate Z</label>
+      <select id="anim">
+        <option value="off" selected>Off</option>
+        <option value="on">On</option>
+      </select>
+    </div>
+
+    <div class="row">
+      <label for="steps">Ray Steps</label>
+      <input id="steps" type="range" min="16" max="320" step="1" value="128" />
+    </div>
+
+    <div class="row">
+      <label for="opacity">Opacity Scale</label>
+      <input id="opacity" type="range" min="0.05" max="2" step="0.01" value="0.7" />
+    </div>
+
+    <div class="stack">
+      <button id="btnInit">Create Texture + Render</button>
+      <button id="btnReupload">Re-upload Data</button>
+      <button id="btnSnapshot">Snapshot GL/State</button>
+      <button id="btnResizePulse">Resize Pulse Test</button>
+      <button id="btnClearLog">Clear Log</button>
+    </div>
+
+    <pre id="status" class="status"></pre>
+  </section>
+
+  <canvas id="gl"></canvas>
+
+  <script>
+    "use strict";
+
+    const canvas = document.getElementById("gl");
+    const status = document.getElementById("status");
+    const dimsEl = document.getElementById("dims");
+    const uploadTypeEl = document.getElementById("uploadType");
+    const filterModeEl = document.getElementById("filterMode");
+    const sampleModeEl = document.getElementById("sampleMode");
+    const renderPathEl = document.getElementById("renderPath");
+    const useOffscreenEl = document.getElementById("useOffscreen");
+    const zSliceEl = document.getElementById("zSlice");
+    const animEl = document.getElementById("anim");
+    const stepsEl = document.getElementById("steps");
+    const opacityEl = document.getElementById("opacity");
+
+    const gl = canvas.getContext("webgl2", {
+      alpha: false,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      preserveDrawingBuffer: true,
+      premultipliedAlpha: false,
+    });
+
+    if (!gl) {
+      status.textContent = "WebGL2 not available.";
+      throw new Error("WebGL2 not available");
+    }
+
+    let sliceProgram = null;
+    let rayProgram = null;
+    let blitProgram = null;
+    let tex3d = null;
+    let vao = null;
+    let tStart = performance.now();
+    let offscreenFbo = null;
+    let offscreenColor = null;
+    let offscreenW = 0;
+    let offscreenH = 0;
+    let resizingPulse = false;
+
+    function append(msg, cls) {
+      const line = document.createElement("div");
+      if (cls) line.className = cls;
+      line.textContent = msg;
+      status.appendChild(line);
+      status.scrollTop = status.scrollHeight;
+    }
+
+    function clearLog() {
+      status.innerHTML = "";
+    }
+
+    function glEnumToString(v) {
+      const lut = {
+        [gl.NO_ERROR]: "GL_NO_ERROR",
+        [gl.INVALID_ENUM]: "GL_INVALID_ENUM",
+        [gl.INVALID_VALUE]: "GL_INVALID_VALUE",
+        [gl.INVALID_OPERATION]: "GL_INVALID_OPERATION",
+        [gl.INVALID_FRAMEBUFFER_OPERATION]: "GL_INVALID_FRAMEBUFFER_OPERATION",
+        [gl.OUT_OF_MEMORY]: "GL_OUT_OF_MEMORY",
+      };
+      return lut[v] || `0x${v.toString(16)}`;
+    }
+
+    function drainErrors(tag) {
+      const errs = [];
+      while (true) {
+        const e = gl.getError();
+        if (e === gl.NO_ERROR) break;
+        errs.push(glEnumToString(e));
+      }
+      if (errs.length === 0) {
+        append(`[${tag}] GL_NO_ERROR`, "ok");
+      } else {
+        append(`[${tag}] ${errs.join(", ")}`, "bad");
+      }
+    }
+
+    function createShader(type, src) {
+      const sh = gl.createShader(type);
+      gl.shaderSource(sh, src);
+      gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+        const info = gl.getShaderInfoLog(sh);
+        append(`Shader compile failed: ${info}`, "bad");
+        gl.deleteShader(sh);
+        return null;
+      }
+      return sh;
+    }
+
+    function createProgram(vsSrc, fsSrc) {
+      const vs = createShader(gl.VERTEX_SHADER, vsSrc);
+      const fs = createShader(gl.FRAGMENT_SHADER, fsSrc);
+      if (!vs || !fs) return null;
+
+      const prog = gl.createProgram();
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
+      gl.linkProgram(prog);
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        append(`Program link failed: ${gl.getProgramInfoLog(prog)}`, "bad");
+        gl.deleteProgram(prog);
+        return null;
+      }
+
+      return prog;
+    }
+
+    function floatToHalf(val) {
+      const f32 = new Float32Array(1);
+      const u32 = new Uint32Array(f32.buffer);
+      f32[0] = val;
+      const x = u32[0];
+
+      const sign = (x >>> 16) & 0x8000;
+      const exp = ((x >>> 23) & 0xff) - 127;
+      const mant = x & 0x7fffff;
+
+      if (exp === 128) {
+        return sign | 0x7c00 | (mant ? 0x0200 : 0);
+      }
+      if (exp > 15) {
+        return sign | 0x7c00;
+      }
+      if (exp > -15) {
+        return sign | ((exp + 15) << 10) | (mant >>> 13);
+      }
+      return sign;
+    }
+
+    function generateVolume(w, h, d) {
+      const arr = new Float32Array(w * h * d);
+      const cx = 0.5 * (w - 1);
+      const cy = 0.5 * (h - 1);
+      const cz = 0.5 * (d - 1);
+      const sx = w * 0.35;
+      const sy = h * 0.35;
+      const sz = d * 0.2;
+
+      let idx = 0;
+      for (let z = 0; z < d; ++z) {
+        for (let y = 0; y < h; ++y) {
+          for (let x = 0; x < w; ++x) {
+            const dx = (x - cx) / sx;
+            const dy = (y - cy) / sy;
+            const dz = (z - cz) / sz;
+            const r2 = dx * dx + dy * dy + dz * dz;
+            const blob = Math.exp(-4.0 * r2);
+            const stripes = 0.15 * Math.sin(z * 0.12) + 0.15 * Math.cos((x + y) * 0.06);
+            arr[idx++] = Math.max(0.0, Math.min(1.0, blob + stripes));
+          }
+        }
+      }
+
+      return arr;
+    }
+
+    function ensurePrograms() {
+      const vsFull = `#version 300 es
+      precision highp float;
+      out vec2 vUv;
+      const vec2 P[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+      void main() {
+        vec2 p = P[gl_VertexID];
+        vUv = 0.5 * (p + 1.0);
+        gl_Position = vec4(p, 0.0, 1.0);
+      }
+      `;
+
+      if (!sliceProgram) {
+        const fsSlice = `#version 300 es
+        precision highp float;
+        precision highp sampler3D;
+        in vec2 vUv;
+        uniform sampler3D uTex;
+        uniform float uSlice;
+        uniform int uMode;
+        out vec4 outColor;
+
+        float sampleManual(vec3 p) {
+          ivec3 dim = textureSize(uTex, 0);
+          float z = clamp(p.z, 0.0, 1.0) * float(dim.z - 1);
+          float z0f = floor(z);
+          float z1f = min(float(dim.z - 1), z0f + 1.0);
+          int z0 = int(z0f);
+          int z1 = int(z1f);
+          vec3 pp = vec3(clamp(p.xy, vec2(0.0), vec2(1.0)), 0.0);
+          ivec2 xy = ivec2(pp.xy * vec2(dim.xy - ivec2(1)));
+          float a = texelFetch(uTex, ivec3(xy, z0), 0).r;
+          float b = texelFetch(uTex, ivec3(xy, z1), 0).r;
+          return mix(a, b, fract(z));
+        }
+
+        void main() {
+          vec3 p = vec3(vUv, uSlice);
+          float v = (uMode == 0) ? texture(uTex, p).r : sampleManual(p);
+          float g = clamp(v, 0.0, 1.0);
+          outColor = vec4(g, g, g, 1.0);
+        }
+        `;
+        sliceProgram = createProgram(vsFull, fsSlice);
+      }
+
+      if (!rayProgram) {
+        const fsRay = `#version 300 es
+        precision highp float;
+        precision highp sampler3D;
+        in vec2 vUv;
+        uniform sampler3D uTex;
+        uniform int uMode;
+        uniform int uSteps;
+        uniform float uOpacityScale;
+        out vec4 outColor;
+
+        float sampleManual(vec3 p) {
+          ivec3 dim = textureSize(uTex, 0);
+          float z = clamp(p.z, 0.0, 1.0) * float(dim.z - 1);
+          float z0f = floor(z);
+          float z1f = min(float(dim.z - 1), z0f + 1.0);
+          int z0 = int(z0f);
+          int z1 = int(z1f);
+          vec3 pp = vec3(clamp(p.xy, vec2(0.0), vec2(1.0)), 0.0);
+          ivec2 xy = ivec2(pp.xy * vec2(dim.xy - ivec2(1)));
+          float a = texelFetch(uTex, ivec3(xy, z0), 0).r;
+          float b = texelFetch(uTex, ivec3(xy, z1), 0).r;
+          return mix(a, b, fract(z));
+        }
+
+        float sampleVol(vec3 p) {
+          return (uMode == 0) ? texture(uTex, p).r : sampleManual(p);
+        }
+
+        void main() {
+          int steps = max(uSteps, 2);
+          vec3 pos = vec3(vUv, 0.0);
+          float dz = 1.0 / float(steps - 1);
+
+          vec3 accum = vec3(0.0);
+          float alpha = 0.0;
+
+          for (int i = 0; i < 512; ++i) {
+            if (i >= steps) break;
+            float v = clamp(sampleVol(pos), 0.0, 1.0);
+            float a = clamp(v * uOpacityScale * dz * 6.0, 0.0, 1.0);
+            vec3 c = vec3(v);
+            accum += (1.0 - alpha) * a * c;
+            alpha += (1.0 - alpha) * a;
+            if (alpha > 0.995) break;
+            pos.z += dz;
+          }
+
+          outColor = vec4(accum, 1.0);
+        }
+        `;
+        rayProgram = createProgram(vsFull, fsRay);
+      }
+
+      if (!blitProgram) {
+        const fsBlit = `#version 300 es
+        precision highp float;
+        in vec2 vUv;
+        uniform sampler2D uColor;
+        out vec4 outColor;
+        void main() {
+          outColor = texture(uColor, vUv);
+        }
+        `;
+        blitProgram = createProgram(vsFull, fsBlit);
+      }
+
+      return !!(sliceProgram && rayProgram && blitProgram);
+    }
+
+    function uploadVolumeTexture() {
+      const [w, h, d] = dimsEl.value.split(",").map(Number);
+      const uploadType = uploadTypeEl.value;
+      const filterMode = filterModeEl.value;
+
+      const floatData = generateVolume(w, h, d);
+      let pixelType = gl.FLOAT;
+      let data = floatData;
+
+      if (uploadType === "half") {
+        pixelType = gl.HALF_FLOAT;
+        const halfData = new Uint16Array(floatData.length);
+        for (let i = 0; i < floatData.length; ++i) {
+          halfData[i] = floatToHalf(floatData[i]);
+        }
+        data = halfData;
+      }
+
+      if (!tex3d) tex3d = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_3D, tex3d);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(
+        gl.TEXTURE_3D,
+        gl.TEXTURE_MIN_FILTER,
+        filterMode === "linear" ? gl.LINEAR : gl.NEAREST
+      );
+      gl.texParameteri(
+        gl.TEXTURE_3D,
+        gl.TEXTURE_MAG_FILTER,
+        filterMode === "linear" ? gl.LINEAR : gl.NEAREST
+      );
+
+      gl.texImage3D(
+        gl.TEXTURE_3D,
+        0,
+        gl.R16F,
+        w,
+        h,
+        d,
+        0,
+        gl.RED,
+        pixelType,
+        data
+      );
+
+      append(
+        `texImage3D: internal=R16F format=RED type=${uploadType.toUpperCase()} size=${w}x${h}x${d}`,
+        "warn"
+      );
+      drainErrors("texImage3D");
+    }
+
+    function ensureOffscreenTarget(w, h) {
+      if (!offscreenFbo) {
+        offscreenFbo = gl.createFramebuffer();
+      }
+      if (!offscreenColor) {
+        offscreenColor = gl.createTexture();
+      }
+      if (offscreenW === w && offscreenH === h) {
+        return;
+      }
+
+      offscreenW = w;
+      offscreenH = h;
+      gl.bindTexture(gl.TEXTURE_2D, offscreenColor);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, offscreenFbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, offscreenColor, 0);
+      const fboStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+      append(`[offscreen] FBO status=${glEnumToString(fboStatus)}`, fboStatus === gl.FRAMEBUFFER_COMPLETE ? "ok" : "bad");
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      drainErrors("offscreen-setup");
+    }
+
+    function init() {
+      if (!ensurePrograms()) return;
+
+      if (!vao) vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+
+      uploadVolumeTexture();
+      drainErrors("init");
+    }
+
+    function resize() {
+      const dpr = Math.max(1, Math.min(window.devicePixelRatio || 1, 2));
+      const w = Math.floor(canvas.clientWidth * dpr);
+      const h = Math.floor(canvas.clientHeight * dpr);
+      if (canvas.width !== w || canvas.height !== h) {
+        canvas.width = w;
+        canvas.height = h;
+      }
+      gl.viewport(0, 0, canvas.width, canvas.height);
+
+      if (useOffscreenEl.value === "on") {
+        ensureOffscreenTarget(canvas.width, canvas.height);
+      }
+    }
+
+    function drawVolumePass(slice) {
+      const renderPath = renderPathEl.value;
+      const mode = Number(sampleModeEl.value);
+      const steps = Number(stepsEl.value);
+      const opacityScale = Number(opacityEl.value);
+
+      gl.bindVertexArray(vao);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_3D, tex3d);
+
+      if (renderPath === "slice") {
+        gl.useProgram(sliceProgram);
+        gl.uniform1i(gl.getUniformLocation(sliceProgram, "uTex"), 0);
+        gl.uniform1i(gl.getUniformLocation(sliceProgram, "uMode"), mode);
+        gl.uniform1f(gl.getUniformLocation(sliceProgram, "uSlice"), slice);
+      } else {
+        gl.useProgram(rayProgram);
+        gl.uniform1i(gl.getUniformLocation(rayProgram, "uTex"), 0);
+        gl.uniform1i(gl.getUniformLocation(rayProgram, "uMode"), mode);
+        gl.uniform1i(gl.getUniformLocation(rayProgram, "uSteps"), steps);
+        gl.uniform1f(gl.getUniformLocation(rayProgram, "uOpacityScale"), opacityScale);
+      }
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    function render() {
+      resize();
+      if (!sliceProgram || !rayProgram || !tex3d || !vao) {
+        requestAnimationFrame(render);
+        return;
+      }
+
+      const animate = animEl.value === "on";
+      let slice = Number(zSliceEl.value);
+      if (animate) {
+        const t = (performance.now() - tStart) * 0.001;
+        slice = 0.5 + 0.5 * Math.sin(t * 0.8);
+      }
+
+      const useOffscreen = useOffscreenEl.value === "on";
+
+      if (useOffscreen) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, offscreenFbo);
+      } else {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      }
+
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.clearColor(0.0, 0.0, 0.0, 1.0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      drawVolumePass(slice);
+
+      if (useOffscreen) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.clearColor(0.0, 0.0, 0.0, 1.0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(blitProgram);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, offscreenColor);
+        gl.uniform1i(gl.getUniformLocation(blitProgram, "uColor"), 0);
+        gl.bindVertexArray(vao);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      }
+
+      requestAnimationFrame(render);
+    }
+
+    function snapshotState() {
+      const viewport = gl.getParameter(gl.VIEWPORT);
+      const curProg = gl.getParameter(gl.CURRENT_PROGRAM);
+      const curFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING);
+      const activeTex = gl.getParameter(gl.ACTIVE_TEXTURE);
+      const tex3dBinding = gl.getParameter(gl.TEXTURE_BINDING_3D);
+      const tex2dBinding = gl.getParameter(gl.TEXTURE_BINDING_2D);
+      const blend = gl.isEnabled(gl.BLEND);
+      const depth = gl.isEnabled(gl.DEPTH_TEST);
+      const cull = gl.isEnabled(gl.CULL_FACE);
+
+      gl.finish();
+      const pixel = new Uint8Array(4);
+      gl.readPixels((canvas.width / 2) | 0, (canvas.height / 2) | 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+
+      append("----- snapshot begin -----", "warn");
+      append(`ui: renderPath=${renderPathEl.value} offscreen=${useOffscreenEl.value} sampleMode=${sampleModeEl.value} filter=${filterModeEl.value} uploadType=${uploadTypeEl.value}`, "warn");
+      append(`ui: zSlice=${Number(zSliceEl.value).toFixed(3)} anim=${animEl.value} steps=${stepsEl.value} opacity=${opacityEl.value}`, "warn");
+      append(`gl: viewport=${Array.from(viewport).join(",")}`, "warn");
+      append(`gl: currentProgram=${curProg ? "set" : "null"} framebuffer=${curFbo ? "offscreen" : "default"}`, "warn");
+      append(`gl: activeTex=0x${activeTex.toString(16)} tex3D=${tex3dBinding ? "set" : "null"} tex2D=${tex2dBinding ? "set" : "null"}`, "warn");
+      append(`gl: BLEND=${blend} DEPTH_TEST=${depth} CULL_FACE=${cull}`, "warn");
+      append(`pixelCenter RGBA=${pixel[0]},${pixel[1]},${pixel[2]},${pixel[3]}`, pixel[0] || pixel[1] || pixel[2] ? "ok" : "bad");
+      drainErrors("snapshot");
+      append("----- snapshot end -----", "warn");
+    }
+
+    function printCapabilities() {
+      append(`Renderer: ${gl.getParameter(gl.RENDERER)}`, "warn");
+      append(`Vendor: ${gl.getParameter(gl.VENDOR)}`, "warn");
+      append(`Version: ${gl.getParameter(gl.VERSION)}`, "warn");
+      append(`MAX_3D_TEXTURE_SIZE: ${gl.getParameter(gl.MAX_3D_TEXTURE_SIZE)}`, "warn");
+      append(`MAX_TEXTURE_SIZE: ${gl.getParameter(gl.MAX_TEXTURE_SIZE)}`, "warn");
+      append(`MAX_COLOR_ATTACHMENTS: ${gl.getParameter(gl.MAX_COLOR_ATTACHMENTS)}`, "warn");
+      append(`OES_texture_float_linear: ${gl.getExtension("OES_texture_float_linear") ? "yes" : "no"}`, "warn");
+      append(`EXT_color_buffer_float: ${gl.getExtension("EXT_color_buffer_float") ? "yes" : "no"}`, "warn");
+    }
+
+    function runResizePulse() {
+      if (resizingPulse) return;
+      resizingPulse = true;
+      append("Resize pulse started (30 ticks)", "warn");
+      let i = 0;
+      const timer = setInterval(() => {
+        const even = i % 2 === 0;
+        canvas.style.height = even ? "58vh" : "66vh";
+        resize();
+        i += 1;
+        if (i >= 30) {
+          clearInterval(timer);
+          canvas.style.height = "calc(100vh - 24px)";
+          resize();
+          resizingPulse = false;
+          append("Resize pulse finished", "ok");
+        }
+      }, 120);
+    }
+
+    document.getElementById("btnInit").addEventListener("click", init);
+
+    document.getElementById("btnReupload").addEventListener("click", () => {
+      if (!tex3d) init();
+      uploadVolumeTexture();
+    });
+
+    document.getElementById("btnSnapshot").addEventListener("click", snapshotState);
+    document.getElementById("btnResizePulse").addEventListener("click", runResizePulse);
+    document.getElementById("btnClearLog").addEventListener("click", clearLog);
+
+    filterModeEl.addEventListener("change", () => {
+      if (tex3d) uploadVolumeTexture();
+    });
+    uploadTypeEl.addEventListener("change", () => {
+      if (tex3d) uploadVolumeTexture();
+    });
+    dimsEl.addEventListener("change", () => {
+      if (tex3d) uploadVolumeTexture();
+    });
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "m") {
+        sampleModeEl.value = sampleModeEl.value === "0" ? "1" : "0";
+        append(`Sample mode -> ${sampleModeEl.value === "0" ? "texture" : "manual"}`, "warn");
+      }
+      if (e.key === "f") {
+        filterModeEl.value = filterModeEl.value === "linear" ? "nearest" : "linear";
+        uploadVolumeTexture();
+      }
+      if (e.key === "r") {
+        renderPathEl.value = renderPathEl.value === "slice" ? "raymarch" : "slice";
+        append(`Render path -> ${renderPathEl.value}`, "warn");
+      }
+      if (e.key === "o") {
+        useOffscreenEl.value = useOffscreenEl.value === "off" ? "on" : "off";
+        append(`Offscreen -> ${useOffscreenEl.value}`, "warn");
+      }
+      if (e.key === "s") {
+        snapshotState();
+      }
+    });
+
+    printCapabilities();
+    init();
+    render();
+  </script>
+</body>
+</html>
